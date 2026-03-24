@@ -1,0 +1,100 @@
+name: Build and Push Docker image (dev)
+
+on:
+  workflow_call:
+    inputs:
+      registry:
+        type: string
+        default: ghcr.io
+      image_name:
+        type: string
+        required: true
+      image_repo:
+        type: string
+        default: ""
+      dockerfile:
+        type: string
+        default: ./Dockerfile
+      context:
+        type: string
+        default: .
+      checkout_ref:
+        type: string
+        default: ""
+      tag_prefix:
+        type: string
+        default: dev
+      short_sha_length:
+        type: number
+        default: 10
+    outputs:
+      short_sha:
+        value: ${{ jobs.build.outputs.short_sha }}
+      image_repo:
+        value: ${{ jobs.build.outputs.image_repo }}
+      image_tag:
+        value: ${{ jobs.build.outputs.image_tag }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      short_sha: ${{ steps.short-sha.outputs.short_sha }}
+      image_repo: ${{ steps.image-repo.outputs.image_repo }}
+      image_tag: ${{ steps.image-tag.outputs.image_tag }}
+
+    steps:
+      - name: Checkout code (default ref)
+        if: inputs.checkout_ref == ''
+        uses: actions/checkout@v4
+
+      - name: Checkout code (specified ref)
+        if: inputs.checkout_ref != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Resolve image repo
+        id: image-repo
+        run: |
+          if [ -n "${{ inputs.image_repo }}" ]; then
+            image_repo="${{ inputs.image_repo }}"
+          else
+            image_repo="${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.image_name }}"
+          fi
+          echo "image_repo=$image_repo" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_REPO=$image_repo" >> "$GITHUB_ENV"
+
+      - name: Set short SHA
+        id: short-sha
+        run: |
+          short_sha="${GITHUB_SHA:0:${{ inputs.short_sha_length }}}"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set image tag
+        id: image-tag
+        run: |
+          echo "image_tag=${{ inputs.tag_prefix }}-${{ steps.short-sha.outputs.short_sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ inputs.tag_prefix }}
+            ${{ env.IMAGE_REPO }}:${{ inputs.tag_prefix }}-${{ steps.short-sha.outputs.short_sha }}
