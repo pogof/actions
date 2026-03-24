@@ -1,0 +1,143 @@
+name: Reusable - Update compose and notify webhook
+
+on:
+  workflow_call:
+    inputs:
+      compose_repository:
+        type: string
+        required: true
+      compose_path:
+        type: string
+        default: docker-compose.yml
+      compose_ref:
+        type: string
+        default: ""
+      image_repo:
+        type: string
+        required: true
+      image_tag:
+        type: string
+        required: true
+      webhook_enabled:
+        type: boolean
+        default: false
+      webhook_url:
+        type: string
+        default: ""
+    secrets:
+      deploy_repo_token:
+        required: true
+      webhook_secret:
+        required: false
+    outputs:
+      deploy_pushed:
+        value: ${{ jobs.update.outputs.deploy_pushed }}
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      deploy_pushed: ${{ steps.commit.outputs.deploy_pushed }}
+
+    steps:
+      - name: Validate webhook config
+        if: inputs.webhook_enabled && inputs.webhook_url == ''
+        run: |
+          echo "webhook_enabled is true but webhook_url is empty."
+          exit 1
+
+      - name: Checkout deployment repo (default ref)
+        if: inputs.compose_ref == ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.compose_repository }}
+          token: ${{ secrets.deploy_repo_token }}
+          path: deploy-repo
+
+      - name: Checkout deployment repo (specified ref)
+        if: inputs.compose_ref != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.compose_repository }}
+          token: ${{ secrets.deploy_repo_token }}
+          path: deploy-repo
+          ref: ${{ inputs.compose_ref }}
+
+      - name: Update compose image tag
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          compose_path = Path('deploy-repo') / '${{ inputs.compose_path }}'
+          if not compose_path.exists():
+            raise SystemExit(f'Compose file not found: {compose_path}')
+
+          content = compose_path.read_text()
+
+          image_repo = '${{ inputs.image_repo }}'
+          image_tag = '${{ inputs.image_tag }}'
+          pattern = re.compile(rf'(^\s*image:\s*{re.escape(image_repo)}:).*$' , re.MULTILINE)
+          if not pattern.search(content):
+            raise SystemExit(f'No image line found to update for {image_repo}.')
+
+          updated = pattern.sub(rf'\1{image_tag}', content)
+          if updated == content:
+            print('Image tag already up to date.')
+          else:
+            compose_path.write_text(updated)
+          PY
+
+      - name: Commit and push compose update
+        id: commit
+        run: |
+          cd deploy-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ inputs.compose_path }}"
+          IMAGE_REPO="${{ inputs.image_repo }}"
+          IMAGE_TAG="${{ inputs.image_tag }}"
+          deploy_pushed=false
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update ${IMAGE_REPO}:${IMAGE_TAG}"
+            git push
+            deploy_pushed=true
+          fi
+          echo "deploy_pushed=$deploy_pushed" >> "$GITHUB_OUTPUT"
+
+      - name: Notify webhook
+        if: inputs.webhook_enabled && steps.commit.outputs.deploy_pushed == 'true'
+        env:
+          WEBHOOK_SECRET: ${{ secrets.webhook_secret }}
+        run: |
+          if [ -z "$WEBHOOK_SECRET" ]; then
+            echo "webhook_secret is required when webhook_enabled is true."
+            exit 1
+          fi
+
+          payload=$(python - <<'PY'
+          import json
+          import os
+
+          payload = {
+            "ref": os.environ.get("GITHUB_REF"),
+            "after": os.environ.get("GITHUB_SHA"),
+            "repository": os.environ.get("GITHUB_REPOSITORY"),
+            "image": f"${{ inputs.image_repo }}:${{ inputs.image_tag }}",
+          }
+          print(json.dumps(payload, separators=(",", ":")))
+          PY
+          )
+
+          signature=$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')
+
+          curl -fsSL -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Hub-Signature-256: sha256=$signature" \
+            -d "$payload" \
+            "${{ inputs.webhook_url }}"
