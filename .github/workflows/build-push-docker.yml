@@ -1,0 +1,179 @@
+name: Build and Push Docker Image
+
+on:
+  workflow_call:
+    inputs:
+
+      # Set the mode to determine the tagging strategy
+      mode:
+        type: string
+        default: release
+      
+      # Set what registry to push to (default: GitHub Container Registry)
+      registry:
+        type: string
+        default: ghcr.io
+      
+      # Set the image name (required)
+      image_name:
+        type: string
+        required: true
+      
+      # Set the image repository (optional, default: "")
+      image_repo:
+        type: string
+        default: ""
+      
+      
+      # Set the Dockerfile path (optional, default: ./Dockerfile)
+      dockerfile:
+        type: string
+        default: ./Dockerfile
+      
+      # Set the build context (optional, default: .)
+      context:
+        type: string
+        default: .
+      
+      # Set the checkout ref for the build (optional, default: "")
+      checkout_ref:
+        type: string
+        default: ""
+      
+      
+      ##################################################
+      # Dev mode inputs
+      # Set the tag prefix for dev mode (optional, default: "")
+      tag_prefix:
+        type: string
+        default: ""
+      
+      # Set the short SHA length for the image tag (optional, default: 10)
+      short_sha_length:
+        type: number
+        default: 10
+
+      ##################################################
+
+      ##################################################
+      # Release mode inputs
+      tag_name:
+        type: string
+        default: ""
+      push_latest:
+        type: boolean
+        default: true
+      ##################################################
+
+    # Generate SHA for the DEV mode images
+    outputs:
+      short_sha:
+        value: ${{ jobs.build.outputs.short_sha }}
+      image_repo:
+        value: ${{ jobs.build.outputs.image_repo }}
+      image_tag:
+        value: ${{ jobs.build.outputs.image_tag }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      short_sha: ${{ steps.short-sha.outputs.short_sha }}
+      image_repo: ${{ steps.image-repo.outputs.image_repo }}
+      image_tag: ${{ steps.image-tag.outputs.image_tag }}
+      tags: ${{ steps.tags.outputs.tags }}
+
+    steps:
+      - name: Checkout code (default ref)
+        if: inputs.checkout_ref == ''
+        uses: actions/checkout@v6
+
+      - name: Checkout code (specified ref)
+        if: inputs.checkout_ref != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Validate inputs
+        run: |
+          if [ "${{ inputs.mode }}" != "dev" ] && [ "${{ inputs.mode }}" != "release" ]; then
+            echo "Invalid mode: '${{ inputs.mode }}'. Use 'dev' or 'release'."
+            exit 1
+          fi
+
+          if [ "${{ inputs.mode }}" = "release" ] && [ -z "${{ inputs.tag_name }}" ]; then
+            echo "tag_name is required when mode=release"
+            exit 1
+          fi
+
+      - name: Resolve metadata and tags
+        id: meta
+        run: |
+          if [ -n "${{ inputs.image_repo }}" ]; then
+            image_repo="${{ inputs.image_repo }}"
+          else
+            image_repo="${{ inputs.registry }}/${{ github.repository_owner }}/${{ inputs.image_name }}"
+          fi
+
+          short_sha="${GITHUB_SHA:0:${{ inputs.short_sha_length }}}"
+
+          if [ "${{ inputs.mode }}" = "dev" ]; then
+            image_tag="${{ inputs.tag_prefix }}-$short_sha"
+            tags="$image_repo:${{ inputs.tag_prefix }}\n$image_repo:$image_tag"
+          else
+            image_tag="${{ inputs.tag_name }}"
+            tags="$image_repo:${{ inputs.tag_name }}"
+            if [ "${{ inputs.push_latest }}" = "true" ]; then
+              tags="$tags\n$image_repo:latest"
+            fi
+          fi
+
+          echo "IMAGE_REPO=$image_repo" >> "$GITHUB_ENV"
+
+          echo "image_repo=$image_repo" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          printf "%b\n" "$tags" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+########################################################################
+# EXAMPLE USE
+########################################################################
+# jobs:
+#   dev:
+#     uses: ./.github/workflows/build-push-docker.yml
+#     with:
+#       mode: dev
+#       image_name: my-app
+
+#   release:
+#     uses: ./.github/workflows/build-push-docker.yml
+#     with:
+#       mode: release
+#       image_name: my-app
+#       tag_name: v1.2.3
+#       push_latest: true
