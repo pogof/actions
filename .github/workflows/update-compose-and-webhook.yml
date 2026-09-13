@@ -51,7 +51,7 @@ jobs:
 
       - name: Checkout deployment repo (default ref)
         if: inputs.compose_ref == ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ inputs.compose_repository }}
           token: ${{ secrets.deploy_repo_token }}
@@ -59,7 +59,7 @@ jobs:
 
       - name: Checkout deployment repo (specified ref)
         if: inputs.compose_ref != ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ inputs.compose_repository }}
           token: ${{ secrets.deploy_repo_token }}
